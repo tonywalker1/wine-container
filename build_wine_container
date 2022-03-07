@@ -1,0 +1,129 @@
+#!/usr/bin/env sh
+# 
+# MIT License
+# 
+# Copyright (c) 2021 Tony Walker
+# 
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+# 
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+# 
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+# 
+
+
+#
+# Environment
+#
+IMAGE_NAME="wine_container"
+HOME_VOLUME="wine_volume"
+SAVE_WORKING=false
+KEEP_OLD=false
+
+
+#
+# Helper functions
+#
+display_help() {
+    echo "Build an OCI container for Wine."
+    echo ""
+    echo "Usage: build_wine_container [options]"
+    echo ""
+    echo "Options:"
+    echo "  -d, --dir         Volume to contain the home directory. [default: $HOME_VOLUME]"
+    echo "  -h, --help        Display this message."
+    echo "  -k, --keep        Delete previous images before writing the new image. [default: $KEEP_OLD]"
+    echo "  -n, --name        Image name. [default: $IMAGE_NAME]"
+    echo "  -p, --preserve    Once the image is complete, preserve the working layers. [default: $SAVE_WORKING]"
+}
+
+
+#
+# Handle the command line
+#
+while [ $# -gt 0 ]
+do
+    case $1 in
+        -d | --dir)
+            HOME_VOLUME="$2"
+            shift 2
+            ;;
+        -h | --help)
+            display_help
+            exit 1
+            ;;
+        -k | --keep)
+            KEEP_OLD=false
+            shift
+            ;;
+        -n | --name)
+            IMAGE_NAME="$2"
+            shift 2
+            ;;
+        -p | --preserve)
+            SAVE_WORKING=true
+            shift
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
+
+
+#
+# Initialize the image
+#
+echo "Creating $IMAGE_NAME..."
+WORKING_NAME=$(buildah from fedora)
+
+
+#
+# Create the home volume
+#
+if ! podman volume exists "$HOME_VOLUME"
+then
+    echo "* Creating $HOME_VOLUME for /root"
+    podman volume create "$HOME_VOLUME"
+fi
+
+
+#
+# Install software
+#
+echo "* Installing Wine..."
+buildah run "$WORKING_NAME" -- dnf install -y wine || exit 1
+
+
+#
+# Commit the image
+#
+if podman image exists "$IMAGE_NAME"
+then
+    if [ "$KEEP_OLD" = false ]
+    then
+        echo "* Removing previous image..."
+        podman rmi "$IMAGE_NAME"
+    fi
+fi
+buildah commit "$WORKING_NAME" "$IMAGE_NAME" || exit 1
+if [ "$SAVE_WORKING" = false ]
+then
+    echo "* Removing working image..."
+    buildah rm "$WORKING_NAME"
+fi
+
+exit 0
+

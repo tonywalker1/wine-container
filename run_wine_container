@@ -1,0 +1,88 @@
+#!/usr/bin/env sh
+# 
+# MIT License
+# 
+# Copyright (c) 2021 Tony Walker
+# 
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+# 
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+# 
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+# 
+
+
+#
+# Environment
+#
+IMAGE_NAME="wine_container"
+HOME_VOLUME="wine_volume"
+COMMAND_LINE="/bin/bash"
+
+display_help() {
+    echo "Run a Wine or Codeweaver Crossover OCI container."
+    echo ""
+    echo "Usage: run_wine_container [options]"
+    echo ""
+    echo "Options:"
+    echo "  -d, --dir     Volume to contain the home directory. [default: $HOME_VOLUME]"
+    echo "  -h, --help    Display this message."
+    echo "  -n, --name    Image name. [default: $IMAGE_NAME]"
+    echo "  -r, --run     Command to run [default: $COMMAND_LINE]"
+    echo ""
+    echo "See default.conf for a documented example config file."
+}
+
+#
+# Handle the command line
+#
+while [ $# -gt 0 ]
+do
+    case $1 in
+        -d | --dir)
+            HOME_VOLUME="$2"
+            shift 2
+            ;;
+        -h | --help)
+            display_help
+            exit 1
+            ;;
+        -n | --name)
+            IMAGE_NAME="$2"
+            shift 2
+            ;;
+        -r | --run)
+            COMMAND_LINE="$2"
+            shift 2
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
+
+LOCAL_UID=$(id -u)
+podman run \
+    --security-opt label=disable \
+    --mount type=volume,source="$HOME_VOLUME",target="/root" \
+    --volume /tmp/.X11-unix:/tmp/.X11-unix \
+    --volume /run/user/$LOCAL_UID/pulse:/run/user/$LOCAL_UID/pulse \
+    --env DISPLAY="$DISPLAY" \
+    --env PULSE_SERVER=/run/user/$LOCAL_UID/pulse/native \
+    --rm \
+    -ti \
+    "$IMAGE_NAME" \
+    $COMMAND_LINE
+
