@@ -16,11 +16,30 @@ solution is to run those apps in a container. That is the point of this project.
 
 # Documentation and Usage
 
+Building and running are facilitated by two scripts: *build_wine_container*
+and *run_wine_container*. Each script offers help in the usual way, for example:
 
+```shell
+build_wine_container --help
+```
+
+Assuming you want to use this project to run CrappyWindowsApp, you could do the
+following:
+
+```shell
+build_wine_container -d CrappyHomeVolume -f -n CrappyWindowsApp
+run_wine_container -d CrappyHomeVolume -n CrappyWindowsApp -r <path_to_crappy_app>/crappyapp.exe
+```
+
+The first line above will create a volume named *CrappyHomeVolume* and an 
+OCI container named *CrappyWindowsApp*. The second line will run the app in 
+the new container.
 
 # Platforms
 
-
+This project should work correctly on any recent Linux distribution. I currently
+use Fedora (F35 Silverblue and Kinoite)
+, so this platform is well tested by me.
 
 # Dependencies
 
@@ -30,7 +49,8 @@ solution is to run those apps in a container. That is the point of this project.
 # Contributing
 
 I would love suggestions, fixes, documentation, examples, and other
-contributions. See [CONTRIBUTING](CONTRIBUTING.md) and [CODE_OF_CONDUCT](CODE_OF_CONDUCT.md) 
+contributions. See [CONTRIBUTING](CONTRIBUTING.md)
+and [CODE_OF_CONDUCT](CODE_OF_CONDUCT.md)
 for details.
 
 See [CONTRIBUTORS](CONTRIBUTORS.md) for a list of contributors.
