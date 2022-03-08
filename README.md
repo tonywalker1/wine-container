@@ -1,4 +1,35 @@
 # wine-container
-OCI Container for Wine using Buildah and Podman.
+
+OCI Container for Wine (or Codeweaver's Crossover) using Buildah and Podman.
+
+Many old but useful Windows apps are probably poorly maintained or patched.
+Others that, while newer, are potentially buggy or have security issues. One
+solution is to run those apps in a container. That is the point of this project.
+
+# Goals
+
+* Use Podman (rootless) to limit breakout attacks.
+* All data is written to a volume and, except the sockets for X11 and
+  PulseAudio, the containers has no access to the underlying filesystem.
+* Allow Windows apps to be orchestrated as a part of a collection of containers.
+* Support Codeweaver's Crossover in addition to Wine.
+
+# Documentation and Usage
 
 
+
+# Platforms
+
+
+
+# Dependencies
+
+* [Buildah](https://buildah.io/)
+* [Podman](https://podman.io/)
+
+# Contributing
+
+I would love suggestions, fixes, documentation, examples, and other
+contributions. See CONTRIBUTING and CODE_OF_CONDUCT for details.
+
+See CONTRIBUTORS for a list of contributors.
