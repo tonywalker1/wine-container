@@ -30,6 +30,7 @@ solution is to run those apps in a container. That is the point of this project.
 # Contributing
 
 I would love suggestions, fixes, documentation, examples, and other
-contributions. See CONTRIBUTING and CODE_OF_CONDUCT for details.
+contributions. See [CONTRIBUTING](CONTRIBUTING.md) and [CODE_OF_CONDUCT](CODE_OF_CONDUCT.md) 
+for details.
 
-See CONTRIBUTORS for a list of contributors.
+See [CONTRIBUTORS](CONTRIBUTORS.md) for a list of contributors.
