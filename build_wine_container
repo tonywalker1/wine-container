@@ -102,6 +102,7 @@ WORKING_NAME=$(buildah from fedora)
 if ! podman volume exists "$HOME_VOLUME"; then
     echo "* Creating $HOME_VOLUME for /root"
     podman volume create "$HOME_VOLUME"
+    chmod o+w "$HOME/.local/share/containers/storage/volumes/$HOME_VOLUME/_data"
 fi
 
 #

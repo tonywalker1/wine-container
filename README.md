@@ -31,9 +31,14 @@ build_wine_container -d CrappyHomeVolume -f -n CrappyWindowsApp
 run_wine_container -d CrappyHomeVolume -n CrappyWindowsApp -r <path_to_crappy_app>/crappyapp.exe
 ```
 
-The first line above will create a volume named *CrappyHomeVolume* and an 
-OCI container named *CrappyWindowsApp*. The second line will run the app in 
-the new container.
+The first line above will create a volume named *CrappyHomeVolume* and an OCI
+container named *CrappyWindowsApp*. The second line will run the app in the new
+container.
+
+The volume is stored on the container host
+in ```~/.local/share/containers/storage/volumes/$HOME_VOLUME/_data```. The build
+script automatically makes this directory writable from the user that launched
+Podman so you can copy/rename/delete files from the host.
 
 # Platforms
 
