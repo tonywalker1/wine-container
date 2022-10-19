@@ -71,15 +71,23 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+chmod u+rwx "$HOME/.local/share/containers/storage/volumes/$HOME_VOLUME/_data"
+
 LOCAL_UID=$(id -u)
 podman run \
-    --security-opt label=disable \
     --mount type=volume,source="$HOME_VOLUME",target="/root" \
+    --volume /etc/localtime:/etc/localtime:ro \
     --volume /tmp/.X11-unix:/tmp/.X11-unix \
+    --volume /run/user/$LOCAL_UID/bus:/run/user/$LOCAL_UID/bus \
+    --volume /run/user/$LOCAL_UID/pipewire-0:/run/user/$LOCAL_UID/pipewire-0 \
     --volume /run/user/$LOCAL_UID/pulse:/run/user/$LOCAL_UID/pulse \
+    --volume /run/user/$LOCAL_UID/wayland-0:/run/user/$LOCAL_UID/wayland-0 \
     --env DISPLAY="$DISPLAY" \
+    --env WAYLAND_DISPLAY="$WAYLAND_DISPLAY" \
     --env PULSE_SERVER=/run/user/$LOCAL_UID/pulse/native \
+    --security-opt label=type:container_runtime_t \
     --rm \
     -ti \
     "$IMAGE_NAME" \
     $COMMAND_LINE
+

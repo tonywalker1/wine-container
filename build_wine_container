@@ -1,4 +1,4 @@
-#!/usr/bin/env sh
+#!/usr/bin/env bash
 #
 # MIT License
 #
@@ -26,12 +26,13 @@
 #
 # Environment
 #
+BASE_IMAGE="docker.io/library/debian:latest"
 IMAGE_NAME="wine_container"
 HOME_VOLUME="wine_volume"
 SAVE_WORKING=false
 KEEP_OLD=false
 WITH_FIREFOX=false
-CROSSOVER_RPM=""
+CROSSOVER_PKG=""
 EXTRA_SCRIPT=""
 
 #
@@ -43,7 +44,8 @@ display_help() {
     echo "Usage: build_wine_container [options]"
     echo ""
     echo "Options:"
-    echo "  -c, --crossover   Optional path to the Crossover RPM."
+    echo "  -b, --base        Base image for the container <debian | fedora>. [default: debian]"
+    echo "  -c, --crossover   Optional path to the Crossover DEB or RPM."
     echo "  -d, --dir         Volume to contain the home directory. [default: $HOME_VOLUME]"
     echo "  -e, --extra       Optional script for your customization."
     echo "  -f, --firefox     Install Firefox. [default: $WITH_FIREFOX]"
@@ -58,8 +60,12 @@ display_help() {
 #
 while [ $# -gt 0 ]; do
     case $1 in
+        -b | --base)
+            BASE_IMAGE="$2"
+            shift 2
+            ;;
         -c | --crossover)
-            CROSSOVER_RPM="$2"
+            CROSSOVER_PKG="$2"
             shift 2
             ;;
         -d | --dir)
@@ -100,7 +106,7 @@ done
 # Initialize the image
 #
 echo "Creating $IMAGE_NAME..."
-WORKING_NAME=$(buildah from fedora)
+WORKING_NAME=$(buildah from "$BASE_IMAGE")
 
 #
 # Create the home volume
@@ -114,32 +120,68 @@ fi
 #
 # Install software
 #
-echo "* Installing Wine..."
-buildah run "$WORKING_NAME" -- dnf install -y wine firefox || exit 1
-if [ "$CROSSOVER_RPM" ]; then
-    echo "* Installing Crossover..."
-    CROSSOVER_FILE=$(basename "$CROSSOVER_RPM")
-    buildah copy "$WORKING_NAME" "$CROSSOVER_RPM" /tmp/ || exit 1
-    buildah run "$WORKING_NAME" -- dnf install -y \
-        gtk3 \
-        libxslt.i686 \
-        perl-File-Copy \
-        python3-dbus \
-        python3-gobject \
-        vte291 \
-        "/tmp/$CROSSOVER_FILE" || exit 1
-    CROSSOVER_DIR=$(dirname "$CROSSOVER_RPM")
-    if [ -f "$CROSSOVER_DIR/license.txt" ]; then
-        buildah copy "$WORKING_NAME" "$CROSSOVER_DIR/license.txt" /opt/cxoffice/etc/
+if [[ "$BASE_IMAGE" =~ "debian" ]]; then
+    echo "* Installing Wine..."
+    buildah run "$WORKING_NAME" -- dpkg --add-architecture i386 || exit 1
+    buildah run "$WORKING_NAME" -- apt update || exit 1
+    buildah run "$WORKING_NAME" -- apt install -y wine || exit 1
+
+    if [ "$CROSSOVER_PKG" ]; then
+        echo "* Installing Crossover..."
+        CROSSOVER_FILE=$(basename "$CROSSOVER_PKG")
+        CROSSOVER_DIR=$(dirname "$CROSSOVER_PKG")
+
+        buildah copy "$WORKING_NAME" "$CROSSOVER_PKG" /tmp/ || exit 1
+        buildah run "$WORKING_NAME" -- apt install -y \
+            "/tmp/$CROSSOVER_FILE" || exit 1
+
+        if [ -f "$CROSSOVER_DIR/license.txt" ]; then
+            buildah copy "$WORKING_NAME" "$CROSSOVER_DIR/license.txt" /opt/cxoffice/etc/
+        fi
+        if [ -f "$CROSSOVER_DIR/license.sig" ]; then
+            buildah copy "$WORKING_NAME" "$CROSSOVER_DIR/license.sig" /opt/cxoffice/etc/
+        fi
+
+        buildah run "$WORKING_NAME" -- rm -f "/tmp/$CROSSOVER_FILE"
+    fi 
+
+    if [ "$WITH_FIREFOX" = true ]; then
+        echo "* Installing Firefox..."
+        buildah run "$WORKING_NAME" -- apt install -y firefox-esr || exit 1
     fi
-    if [ -f "$CROSSOVER_DIR/license.sig" ]; then
-        buildah copy "$WORKING_NAME" "$CROSSOVER_DIR/license.sig" /opt/cxoffice/etc/
+elif [[ "$BASE_IMAGE" =~ "fedora" ]]; then
+    echo "* Installing Wine..."
+    buildah run "$WORKING_NAME" -- dnf install -y wine || exit 1
+
+    if [ "$CROSSOVER_PKG" ]; then
+        echo "* Installing Crossover..."
+        CROSSOVER_FILE=$(basename "$CROSSOVER_PKG")
+        CROSSOVER_DIR=$(dirname "$CROSSOVER_PKG")
+
+        buildah copy "$WORKING_NAME" "$CROSSOVER_PKG" /tmp/ || exit 1
+        buildah run "$WORKING_NAME" -- dnf install -y \
+            gtk3 \
+            libxslt.i686 \
+            perl-File-Copy \
+            python3-dbus \
+            python3-gobject \
+            vte291 \
+            "/tmp/$CROSSOVER_FILE" || exit 1
+
+        if [ -f "$CROSSOVER_DIR/license.txt" ]; then
+            buildah copy "$WORKING_NAME" "$CROSSOVER_DIR/license.txt" /opt/cxoffice/etc/
+        fi
+        if [ -f "$CROSSOVER_DIR/license.sig" ]; then
+            buildah copy "$WORKING_NAME" "$CROSSOVER_DIR/license.sig" /opt/cxoffice/etc/
+        fi
+
+        buildah run "$WORKING_NAME" -- rm -f "/tmp/$CROSSOVER_FILE"
     fi
-    buildah run "$WORKING_NAME" -- rm -f "/tmp/$CROSSOVER_FILE"
-fi
-if [ "$WITH_FIREFOX" = true ]; then
-    echo "* Installing Firefox..."
-    buildah run "$WORKING_NAME" -- dnf install -y firefox
+
+    if [ "$WITH_FIREFOX" = true ]; then
+        echo "* Installing Firefox..."
+        buildah run "$WORKING_NAME" -- dnf install -y firefox || exit 1
+    fi
 fi
 
 #
@@ -159,11 +201,12 @@ if podman image exists "$IMAGE_NAME"; then
         podman rmi "$IMAGE_NAME"
     fi
 fi
+
 buildah commit "$WORKING_NAME" "$IMAGE_NAME" || exit 1
+
 if [ "$SAVE_WORKING" = false ]; then
     echo "* Removing working image..."
     buildah rm "$WORKING_NAME"
 fi
-
 
 exit 0
