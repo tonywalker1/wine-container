@@ -1,8 +1,8 @@
-#!/usr/bin/env sh
+#!/usr/bin/bash
 #
 # MIT License
 #
-# Copyright (c) 2021 Tony Walker
+# Copyright (c) 2021-2025 Tony Walker
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -23,13 +23,22 @@
 # SOFTWARE.
 #
 
-#
-# Environment
-#
-IMAGE_NAME="wine_container"
-HOME_VOLUME="wine_volume"
-COMMAND_LINE="/bin/bash"
+set -euo pipefail
 
+#
+# Load globals and shared functions
+#
+LIB_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
+# shellcheck disable=SC1090
+source "$LIB_PATH" || {
+    echo "Error: Failed to load $LIB_PATH" >&2
+    exit 1
+}
+BASE_IMAGE="${BASE_IMAGE}:${DEBIAN_VERSION}"
+
+#
+# Helper functions
+#
 display_help() {
     echo "Run a Wine or Codeweaver Crossover OCI container."
     echo ""
@@ -39,55 +48,164 @@ display_help() {
     echo "  -d, --dir     Volume to contain the home directory. [default: $HOME_VOLUME]"
     echo "  -h, --help    Display this message."
     echo "  -n, --name    Image name. [default: $IMAGE_NAME]"
-    echo "  -r, --run     Command to run [default: $COMMAND_LINE]"
-    echo ""
-    echo "See default.conf for a documented example config file."
+    echo "  -r, --run     Command to run. [default: $COMMAND_LINE]"
+    display_help_footer
+}
+
+check_dependencies() {
+    local missing_deps=()
+    command -v podman >/dev/null 2>&1 || missing_deps+=("podman")
+    command -v id >/dev/null 2>&1 || missing_deps+=("id")
+
+    if [ ${#missing_deps[@]} -gt 0 ]; then
+        echo "Error: dependencies missing: ${missing_deps[*]}" >&2
+        exit 1
+    fi
 }
 
 #
-# Handle the command line
+# Check dependencies and handle the command line
 #
+check_dependencies
 while [ $# -gt 0 ]; do
     case $1 in
-        -d | --dir)
-            HOME_VOLUME="$2"
-            shift 2
-            ;;
-        -h | --help)
-            display_help
+    -d | --dir)
+        if [ -z "${2:-}" ] || [[ "${2:-}" =~ ^- ]]; then
+            echo "Error: --dir requires a volume name argument" >&2
             exit 1
-            ;;
-        -n | --name)
-            IMAGE_NAME="$2"
-            shift 2
-            ;;
-        -r | --run)
-            COMMAND_LINE="$2"
-            shift 2
-            ;;
-        *)
-            break
-            ;;
+        fi
+        HOME_VOLUME="$2"
+        shift 2
+        ;;
+    -h | --help)
+        display_help
+        exit 0
+        ;;
+    -n | --name)
+        if [ -z "${2:-}" ] || [[ "${2:-}" =~ ^- ]]; then
+            echo "Error: --name requires an image name argument" >&2
+            exit 1
+        fi
+        IMAGE_NAME="$2"
+        shift 2
+        ;;
+    -r | --run)
+        if [ -z "${2:-}" ] || [[ "${2:-}" =~ ^- ]]; then
+            echo "Error: --run requires a command argument" >&2
+            exit 1
+        fi
+        COMMAND_LINE="$2"
+        shift 2
+        ;;
+    *)
+        echo "Warning: Unknown argument '$1' ignored" >&2
+        shift
+        ;;
     esac
 done
 
-chmod u+rwx "$HOME/.local/share/containers/storage/volumes/$HOME_VOLUME/_data"
+if ! podman image exists "$IMAGE_NAME"; then
+    echo "Error: Container image '$IMAGE_NAME' not found." >&2
+    echo "Please build the image first using the build_wine_container script." >&2
+    exit 1
+fi
+
+#
+# Setup the environment
+#
+ensure_volume_exists "$HOME_VOLUME"
 
 LOCAL_UID=$(id -u)
+DISPLAY_MOUNTS=""
+ENV_VARS=""
+
+# Wayland or X11
+if [ -n "${WAYLAND_DISPLAY:-}" ] && [ -S "/run/user/$LOCAL_UID/${WAYLAND_DISPLAY:-}" ]; then
+    echo "Using Wayland display server"
+    DISPLAY_MOUNTS="$DISPLAY_MOUNTS --volume /run/user/$LOCAL_UID/$WAYLAND_DISPLAY:/run/user/$LOCAL_UID/$WAYLAND_DISPLAY"
+    ENV_VARS="$ENV_VARS --env WAYLAND_DISPLAY=$WAYLAND_DISPLAY"
+    ENV_VARS="$ENV_VARS --env XDG_SESSION_TYPE=wayland"
+    ENV_VARS="$ENV_VARS --env QT_QPA_PLATFORM=wayland"
+    ENV_VARS="$ENV_VARS --env GDK_BACKEND=wayland"
+    # For X11 compatibility
+    if [ -n "${DISPLAY:-}" ]; then
+        ENV_VARS="$ENV_VARS --env DISPLAY=$DISPLAY"
+        DISPLAY_MOUNTS="$DISPLAY_MOUNTS --volume /tmp/.X11-unix:/tmp/.X11-unix"
+    fi
+elif [ -n "${DISPLAY:-}" ] && [ -d "/tmp/.X11-unix" ]; then
+    echo "Using X11 display server"
+    DISPLAY_MOUNTS="$DISPLAY_MOUNTS --volume /tmp/.X11-unix:/tmp/.X11-unix"
+    ENV_VARS="$ENV_VARS --env DISPLAY=$DISPLAY"
+    ENV_VARS="$ENV_VARS --env XDG_SESSION_TYPE=x11"
+else
+    echo "Warning: No display server detected"
+fi
+
+# Pipewire or PulseAudio
+AUDIO_MOUNTS=""
+if [ -S "/run/user/$LOCAL_UID/pipewire-0" ]; then
+    echo "Using PipeWire audio"
+    AUDIO_MOUNTS="$AUDIO_MOUNTS --volume /run/user/$LOCAL_UID/pipewire-0:/run/user/$LOCAL_UID/pipewire-0"
+    ENV_VARS="$ENV_VARS --env PIPEWIRE_RUNTIME_DIR=/run/user/$LOCAL_UID"
+elif [ -S "/run/user/$LOCAL_UID/pulse/native" ]; then
+    echo "Using PulseAudio"
+    AUDIO_MOUNTS="$AUDIO_MOUNTS --volume /run/user/$LOCAL_UID/pulse:/run/user/$LOCAL_UID/pulse"
+    ENV_VARS="$ENV_VARS --env PULSE_RUNTIME_PATH=/run/user/$LOCAL_UID/pulse"
+    ENV_VARS="$ENV_VARS --env PULSE_SERVER=unix:/run/user/$LOCAL_UID/pulse/native"
+else
+    echo "Warning: No audio system detected"
+fi
+
+# DBus
+DBUS_MOUNTS=""
+if [ -S "/run/user/$LOCAL_UID/bus" ]; then
+    DBUS_MOUNTS="--volume /run/user/$LOCAL_UID/bus:/run/user/$LOCAL_UID/bus"
+    ENV_VARS="$ENV_VARS --env DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$LOCAL_UID/bus"
+fi
+
+# SELinux
+SECURITY_OPTS=""
+if command -v getenforce >/dev/null 2>&1 && [ "$(getenforce 2>/dev/null)" = 'Enforcing' ]; then
+    echo "SELinux enforcing detected"
+    SECURITY_OPTS="--security-opt label=type:container_runtime_t"
+elif command -v getenforce >/dev/null 2>&1 && [ "$(getenforce 2>/dev/null)" = 'Permissive' ]; then
+    echo "SELinux permissive mode detected"
+    SECURITY_OPTS="--security-opt label=type:container_runtime_t"
+else
+    echo "SELinux not enforcing or not present"
+fi
+
+# Extra GUI options
+GUI_OPTS=""
+if [ -n "$DISPLAY_MOUNTS" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then
+    echo "GUI mode detected, adding graphics capabilities"
+    GUI_OPTS="--cap-add SYS_PTRACE"
+
+    if [ -d "/dev/dri" ]; then
+        GUI_OPTS="$GUI_OPTS --device /dev/dri"
+    fi
+
+    GUI_OPTS="$GUI_OPTS --shm-size=1g"
+fi
+
+#
+# Run the container
+#
+echo "Starting container $IMAGE_NAME..."
 podman run \
-    --mount type=volume,source="$HOME_VOLUME",target="/root" \
+    --mount "type=volume,source=$HOME_VOLUME,target=/root" \
     --volume /etc/localtime:/etc/localtime:ro \
-    --volume /tmp/.X11-unix:/tmp/.X11-unix \
-    --volume /run/user/$LOCAL_UID/bus:/run/user/$LOCAL_UID/bus \
-    --volume /run/user/$LOCAL_UID/pipewire-0:/run/user/$LOCAL_UID/pipewire-0 \
-    --volume /run/user/$LOCAL_UID/pulse:/run/user/$LOCAL_UID/pulse \
-    --volume /run/user/$LOCAL_UID/wayland-0:/run/user/$LOCAL_UID/wayland-0 \
-    --env DISPLAY="$DISPLAY" \
-    --env WAYLAND_DISPLAY="$WAYLAND_DISPLAY" \
-    --env PULSE_SERVER=/run/user/$LOCAL_UID/pulse/native \
-    --security-opt label=type:container_runtime_t \
+    "$DISPLAY_MOUNTS" \
+    "$AUDIO_MOUNTS" \
+    "$DBUS_MOUNTS" \
+    "$ENV_VARS" \
+    --env XDG_RUNTIME_DIR="/run/user/$LOCAL_UID" \
+    --env HOME="/root" \
+    "$SECURITY_OPTS" \
+    "$GUI_OPTS" \
     --rm \
     -ti \
     "$IMAGE_NAME" \
-    $COMMAND_LINE
+    "$COMMAND_LINE"
 
+echo "Container $IMAGE_NAME finished successfully."

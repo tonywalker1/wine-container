@@ -1,8 +1,8 @@
-#!/usr/bin/env bash
+#!/usr/bin/bash
 #
 # MIT License
 #
-# Copyright (c) 2021 Tony Walker
+# Copyright (c) 2021-2025 Tony Walker
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -23,84 +23,309 @@
 # SOFTWARE.
 #
 
+set -euo pipefail
+
 #
-# Environment
+# Load globals and shared functions
 #
-BASE_IMAGE="docker.io/library/debian:latest"
-IMAGE_NAME="wine_container"
-HOME_VOLUME="wine_volume"
+LIB_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
+# shellcheck disable=SC1090
+source "$LIB_PATH" || {
+    echo "Error: Failed to load $LIB_PATH" >&2
+    exit 1
+}
+BASE_IMAGE="${BASE_IMAGE}:${DEBIAN_VERSION}"
+
+# Other globals
+CROSSOVER_PACKAGE=""
 SAVE_WORKING=false
 KEEP_OLD=false
 WITH_FIREFOX=false
-CROSSOVER_PKG=""
 EXTRA_SCRIPT=""
+WORKING_NAME=""
 
 #
 # Helper functions
 #
 display_help() {
-    echo "Build an OCI container for Wine or (optionally) Codeweavers' Crossover."
+    echo "Build an OCI container for Wine or (optionally) CodeWeavers' Crossover."
     echo ""
     echo "Usage: build_wine_container [options]"
     echo ""
     echo "Options:"
-    echo "  -b, --base        Base image for the container <debian | fedora>. [default: debian]"
-    echo "  -c, --crossover   Optional path to the Crossover DEB or RPM."
-    echo "  -d, --dir         Volume to contain the home directory. [default: $HOME_VOLUME]"
-    echo "  -e, --extra       Optional script for your customization."
-    echo "  -f, --firefox     Install Firefox. [default: $WITH_FIREFOX]"
-    echo "  -h, --help        Display this message."
-    echo "  -k, --keep        Delete previous images before writing the new image. [default: $KEEP_OLD]"
-    echo "  -n, --name        Image name. [default: $IMAGE_NAME]"
-    echo "  -p, --preserve    Once the image is complete, preserve the working layers. [default: $SAVE_WORKING]"
+    echo "  -w, --wine-source     Wine source <debian | winehq | crossover>. [default: $WINE_SOURCE]"
+    echo "  -v, --debian-version  Debian version <latest | bookworm | bullseye | buster>. [default: $DEBIAN_VERSION]"
+    echo "      --crossover-pkg   Path to Crossover DEB package (required when wine-source=crossover)."
+    echo "  -d, --dir             Volume to contain the home directory. [default: $HOME_VOLUME]"
+    echo "  -e, --extra           Optional script for your customization."
+    echo "  -f, --firefox         Install Firefox. [default: $WITH_FIREFOX]"
+    echo "  -h, --help            Display this message."
+    echo "  -k, --keep            Keep previous images instead of deleting them. [default is delete (not keep)]"
+    echo "  -n, --name            Image name. [default: $IMAGE_NAME]"
+    echo "  -p, --preserve        Once the image is complete, preserve the working layers. [default: $SAVE_WORKING]"
+    display_help_footer
+}
+
+check_dependencies() {
+    local missing_deps=()
+    command -v podman >/dev/null 2>&1 || missing_deps+=("podman")
+    command -v buildah >/dev/null 2>&1 || missing_deps+=("buildah")
+
+    if [ ${#missing_deps[@]} -gt 0 ]; then
+        echo "Error: dependencies missing: ${missing_deps[*]}" >&2
+        exit 1
+    fi
+}
+
+validate_extra_script() {
+    local script_path="$1"
+
+    if [ ! -f "$script_path" ]; then
+        echo "Error: Extra script not found: $script_path" >&2
+        return 1
+    fi
+
+    if [ ! -r "$script_path" ]; then
+        echo "Error: Extra script is not readable: $script_path" >&2
+        return 1
+    fi
+
+    if [ ! -x "$script_path" ]; then
+        echo "Error: Extra script is not executable: $script_path" >&2
+        return 1
+    fi
+
+    if [ -w "$script_path" ] && [ "$(stat -c '%a' "$script_path" 2>/dev/null | cut -c3)" -gt 0 ]; then
+        echo "Warning: Extra script is writable by others, this may be a security risk: $script_path" >&2
+    fi
+
+    if ! head -1 "$script_path" | grep -q '^#!'; then
+        echo "Warning: Extra script lacks a shebang line: $script_path" >&2
+    fi
+
+    return 0
+}
+
+install_wine_debian() {
+    local working_name="$1"
+    echo "* Installing Wine from Debian repositories..."
+
+    buildah run "$working_name" -- dpkg --add-architecture i386
+    buildah run "$working_name" -- apt update
+    buildah run "$working_name" -- apt install -y --no-install-recommends wine
+
+    buildah run "$working_name" -- apt clean || {
+        echo "Warning: Failed to clean apt cache" >&2
+    }
+}
+
+install_wine_winehq() {
+    local working_name="$1"
+    echo "* Installing Wine from WineHQ repository..."
+
+    buildah run "$working_name" -- dpkg --add-architecture i386
+    buildah run "$working_name" -- apt update
+    buildah run "$working_name" -- apt install -y --no-install-recommends \
+        wget \
+        ca-certificates \
+        gnupg
+
+    # See WineHQ...
+    buildah run "$working_name" -- bash -c "
+        wget -qO- https://dl.winehq.org/wine-builds/winehq.key | \
+        gpg --dearmor -o /usr/share/keyrings/winehq-archive-keyring.gpg && \
+        chmod 644 /usr/share/keyrings/winehq-archive-keyring.gpg
+    "
+    # shellcheck disable=SC2016
+    buildah run "$working_name" -- bash -c '
+        DEBIAN_VERSION=$(grep VERSION_CODENAME /etc/os-release | cut -d= -f2)
+        echo "deb [signed-by=/usr/share/keyrings/winehq-archive-keyring.gpg] https://dl.winehq.org/wine-builds/debian/ $DEBIAN_VERSION main" > /etc/apt/sources.list.d/winehq.list
+    '
+
+    buildah run "$working_name" -- apt update
+    buildah run "$working_name" -- apt install -y --install-recommends winehq-stable
+
+    buildah run "$working_name" -- apt clean || {
+        echo "Warning: Failed to clean apt cache" >&2
+    }
+}
+
+install_crossover() {
+    local working_name="$1"
+    if [ ! -f "$CROSSOVER_PACKAGE" ]; then
+        echo "Error: Crossover package file not found: $CROSSOVER_PACKAGE" >&2
+        return 1
+    fi
+
+    if [[ ! "$CROSSOVER_PACKAGE" =~ \.(deb|DEB)$ ]]; then
+        echo "Error: Crossover package must be a DEB file for Debian-based containers: $CROSSOVER_PACKAGE" >&2
+        return 1
+    fi
+
+    echo "* Installing Crossover..."
+    local crossover_file crossover_dir
+    crossover_file=$(basename "$CROSSOVER_PACKAGE")
+    crossover_dir=$(dirname "$CROSSOVER_PACKAGE")
+
+    buildah copy "$working_name" "$CROSSOVER_PACKAGE" /tmp/
+    buildah run "$working_name" -- apt install -y "/tmp/$crossover_file"
+
+    if [ -f "$crossover_dir/license.txt" ]; then
+        buildah copy "$working_name" "$crossover_dir/license.txt" /opt/cxoffice/etc/ || {
+            echo "Warning: Failed to copy license.txt" >&2
+        }
+    fi
+    if [ -f "$crossover_dir/license.sig" ]; then
+        buildah copy "$working_name" "$crossover_dir/license.sig" /opt/cxoffice/etc/ || {
+            echo "Warning: Failed to copy license.sig" >&2
+        }
+    fi
+
+    buildah run "$working_name" -- rm -f "/tmp/$crossover_file" || {
+        echo "Warning: Failed to cleanup temporary Crossover file" >&2
+    }
+}
+
+install_firefox() {
+    local working_name="$1"
+    if [ "$WITH_FIREFOX" = true ]; then
+        echo "* Installing Firefox..."
+        buildah run "$working_name" -- apt install -y firefox-esr
+    fi
+}
+
+build_container() {
+    local working_name="$1"
+
+    case "$WINE_SOURCE" in
+    crossover)
+        install_crossover "$working_name"
+        ;;
+    debian)
+        install_wine_debian "$working_name"
+        ;;
+    winehq)
+        install_wine_winehq "$working_name"
+        ;;
+    *)
+        echo "Error: Unknown wine source: $WINE_SOURCE" >&2
+        return 1
+        ;;
+    esac
+
+    install_firefox "$working_name"
 }
 
 #
-# Handle the command line
+# Check dependencies and handle the command line
 #
+check_dependencies
 while [ $# -gt 0 ]; do
     case $1 in
-        -b | --base)
-            BASE_IMAGE="$2"
-            shift 2
-            ;;
-        -c | --crossover)
-            CROSSOVER_PKG="$2"
-            shift 2
-            ;;
-        -d | --dir)
-            HOME_VOLUME="$2"
-            shift 2
-            ;;
-        -e | --extra)
-            EXTRA_SCRIPT="$2"
-            shift 2
-            ;;
-        -f | --firefox)
-            WITH_FIREFOX=true
-            shift
-            ;;
-        -h | --help)
-            display_help
+    -w | --wine-source)
+        if [ -z "${2:-}" ] || [[ "${2:-}" =~ ^- ]]; then
+            echo "Error: --wine-source requires an argument" >&2
             exit 1
-            ;;
-        -k | --keep)
-            KEEP_OLD=false
-            shift
-            ;;
-        -n | --name)
-            IMAGE_NAME="$2"
-            shift 2
-            ;;
-        -p | --preserve)
-            SAVE_WORKING=true
-            shift
+        fi
+        case "$2" in
+        debian | winehq | crossover)
+            WINE_SOURCE="$2"
             ;;
         *)
-            break
+            echo "Error: Invalid wine source '$2'. Valid options: debian, winehq, crossover" >&2
+            exit 1
             ;;
+        esac
+        shift 2
+        ;;
+    -v | --debian-version)
+        if [ -z "${2:-}" ] || [[ "${2:-}" =~ ^- ]]; then
+            echo "Error: --debian-version requires an argument" >&2
+            exit 1
+        fi
+        case "$2" in
+        latest | bookworm | bullseye | buster)
+            DEBIAN_VERSION="$2"
+            BASE_IMAGE="${BASE_IMAGE}:${DEBIAN_VERSION}"
+            ;;
+        *)
+            echo "Error: Invalid debian version '$2'. Valid options: latest, bookworm, bullseye, buster" >&2
+            exit 1
+            ;;
+        esac
+        shift 2
+        ;;
+    --crossover-pkg | --crossover-package)
+        if [ -z "${2:-}" ] || [[ "${2:-}" =~ ^- ]]; then
+            echo "Error: --crossover-pkg requires a file path argument" >&2
+            exit 1
+        fi
+        CROSSOVER_PACKAGE="$2"
+        shift 2
+        ;;
+    -d | --dir)
+        if [ -z "${2:-}" ] || [[ "${2:-}" =~ ^- ]]; then
+            echo "Error: --dir requires a volume name argument" >&2
+            exit 1
+        fi
+        HOME_VOLUME="$2"
+        shift 2
+        ;;
+    -e | --extra)
+        if [ -z "${2:-}" ] || [[ "${2:-}" =~ ^- ]]; then
+            echo "Error: --extra requires a script path argument" >&2
+            exit 1
+        fi
+        EXTRA_SCRIPT="$2"
+        shift 2
+        ;;
+    -f | --firefox)
+        WITH_FIREFOX=true
+        shift
+        ;;
+    -h | --help)
+        display_help
+        exit 0
+        ;;
+    -k | --keep)
+        KEEP_OLD=true
+        shift
+        ;;
+    -n | --name)
+        if [ -z "${2:-}" ] || [[ "${2:-}" =~ ^- ]]; then
+            echo "Error: --name requires an image name argument" >&2
+            exit 1
+        fi
+        IMAGE_NAME="$2"
+        shift 2
+        ;;
+    -p | --preserve)
+        SAVE_WORKING=true
+        shift
+        ;;
+    *)
+        echo "Warning: Unknown argument '$1' ignored" >&2
+        shift
+        ;;
     esac
 done
+
+if [ "$WINE_SOURCE" = "crossover" ] && [ -z "$CROSSOVER_PACKAGE" ]; then
+    echo "Error: --wine-source crossover requires --crossover-pkg to specify the package path" >&2
+    exit 1
+fi
+
+if [ -n "$CROSSOVER_PACKAGE" ] && [ "$WINE_SOURCE" != "crossover" ]; then
+    echo "Error: --crossover-pkg can only be used with --wine-source crossover" >&2
+    exit 1
+fi
+
+if [ -n "$EXTRA_SCRIPT" ]; then
+    validate_extra_script "$EXTRA_SCRIPT"
+fi
+
+echo "Using base image: $BASE_IMAGE"
+echo "Wine source: $WINE_SOURCE"
 
 #
 # Initialize the image
@@ -108,88 +333,33 @@ done
 echo "Creating $IMAGE_NAME..."
 WORKING_NAME=$(buildah from "$BASE_IMAGE")
 
-#
-# Create the home volume
-#
-if ! podman volume exists "$HOME_VOLUME"; then
-    echo "* Creating $HOME_VOLUME for /root"
-    podman volume create "$HOME_VOLUME" || exit 1
-    chmod u+rwx "$HOME/.local/share/containers/storage/volumes/$HOME_VOLUME/_data"
-fi
-
-#
-# Install software
-#
-if [[ "$BASE_IMAGE" =~ "debian" ]]; then
-    echo "* Installing Wine..."
-    buildah run "$WORKING_NAME" -- dpkg --add-architecture i386 || exit 1
-    buildah run "$WORKING_NAME" -- apt update || exit 1
-    buildah run "$WORKING_NAME" -- apt install -y wine || exit 1
-
-    if [ "$CROSSOVER_PKG" ]; then
-        echo "* Installing Crossover..."
-        CROSSOVER_FILE=$(basename "$CROSSOVER_PKG")
-        CROSSOVER_DIR=$(dirname "$CROSSOVER_PKG")
-
-        buildah copy "$WORKING_NAME" "$CROSSOVER_PKG" /tmp/ || exit 1
-        buildah run "$WORKING_NAME" -- apt install -y \
-            "/tmp/$CROSSOVER_FILE" || exit 1
-
-        if [ -f "$CROSSOVER_DIR/license.txt" ]; then
-            buildah copy "$WORKING_NAME" "$CROSSOVER_DIR/license.txt" /opt/cxoffice/etc/
+# shellcheck disable=SC2317
+cleanup() {
+    local exit_code=$?
+    if [ -n "$WORKING_NAME" ]; then
+        if buildah containers -q 2>/dev/null | grep -q "^$WORKING_NAME$"; then
+            echo "* Cleaning up working container: $WORKING_NAME" >&2
+            if ! buildah rm "$WORKING_NAME" >/dev/null 2>&1; then
+                echo "Warning: Failed to remove working container $WORKING_NAME" >&2
+            fi
         fi
-        if [ -f "$CROSSOVER_DIR/license.sig" ]; then
-            buildah copy "$WORKING_NAME" "$CROSSOVER_DIR/license.sig" /opt/cxoffice/etc/
-        fi
-
-        buildah run "$WORKING_NAME" -- rm -f "/tmp/$CROSSOVER_FILE"
-    fi 
-
-    if [ "$WITH_FIREFOX" = true ]; then
-        echo "* Installing Firefox..."
-        buildah run "$WORKING_NAME" -- apt install -y firefox-esr || exit 1
     fi
-elif [[ "$BASE_IMAGE" =~ "fedora" ]]; then
-    echo "* Installing Wine..."
-    buildah run "$WORKING_NAME" -- dnf install -y wine || exit 1
-
-    if [ "$CROSSOVER_PKG" ]; then
-        echo "* Installing Crossover..."
-        CROSSOVER_FILE=$(basename "$CROSSOVER_PKG")
-        CROSSOVER_DIR=$(dirname "$CROSSOVER_PKG")
-
-        buildah copy "$WORKING_NAME" "$CROSSOVER_PKG" /tmp/ || exit 1
-        buildah run "$WORKING_NAME" -- dnf install -y \
-            gtk3 \
-            libxslt.i686 \
-            perl-File-Copy \
-            python3-dbus \
-            python3-gobject \
-            vte291 \
-            "/tmp/$CROSSOVER_FILE" || exit 1
-
-        if [ -f "$CROSSOVER_DIR/license.txt" ]; then
-            buildah copy "$WORKING_NAME" "$CROSSOVER_DIR/license.txt" /opt/cxoffice/etc/
-        fi
-        if [ -f "$CROSSOVER_DIR/license.sig" ]; then
-            buildah copy "$WORKING_NAME" "$CROSSOVER_DIR/license.sig" /opt/cxoffice/etc/
-        fi
-
-        buildah run "$WORKING_NAME" -- rm -f "/tmp/$CROSSOVER_FILE"
-    fi
-
-    if [ "$WITH_FIREFOX" = true ]; then
-        echo "* Installing Firefox..."
-        buildah run "$WORKING_NAME" -- dnf install -y firefox || exit 1
-    fi
-fi
+    exit "$exit_code"
+}
+trap cleanup EXIT ERR
 
 #
-# Custom configuration...
+# Build the image
 #
-if [ "$EXTRA_SCRIPT" ]; then
+ensure_volume_exists "$HOME_VOLUME"
+build_container "$WORKING_NAME"
+
+if [ -n "$EXTRA_SCRIPT" ]; then
     echo "*** Custom configuration: $EXTRA_SCRIPT..."
-    $EXTRA_SCRIPT "$WORKING_NAME"
+    if ! "$EXTRA_SCRIPT" "$WORKING_NAME"; then
+        echo "Error: Custom script failed with exit code $?" >&2
+        exit 1
+    fi
 fi
 
 #
@@ -201,12 +371,17 @@ if podman image exists "$IMAGE_NAME"; then
         podman rmi "$IMAGE_NAME"
     fi
 fi
+buildah commit "$WORKING_NAME" "$IMAGE_NAME"
 
-buildah commit "$WORKING_NAME" "$IMAGE_NAME" || exit 1
+# cleanup no longer needed/possible
+trap - EXIT ERR
 
 if [ "$SAVE_WORKING" = false ]; then
     echo "* Removing working image..."
-    buildah rm "$WORKING_NAME"
+    buildah rm "$WORKING_NAME" || {
+        echo "Warning: Failed to remove working container $WORKING_NAME" >&2
+    }
 fi
 
+echo "Successfully built container image: $IMAGE_NAME"
 exit 0
