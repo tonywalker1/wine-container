@@ -191,18 +191,19 @@ fi
 #
 # Run the container
 #
+echo "DEBUG: $DISPLAY_MOUNTS"
 echo "Starting container $IMAGE_NAME..."
 podman run \
     --mount "type=volume,source=$HOME_VOLUME,target=/root" \
     --volume /etc/localtime:/etc/localtime:ro \
-    "$DISPLAY_MOUNTS" \
-    "$AUDIO_MOUNTS" \
-    "$DBUS_MOUNTS" \
-    "$ENV_VARS" \
+    $DISPLAY_MOUNTS \
+    $AUDIO_MOUNTS \
+    $DBUS_MOUNTS \
+    $ENV_VARS \
     --env XDG_RUNTIME_DIR="/run/user/$LOCAL_UID" \
     --env HOME="/root" \
-    "$SECURITY_OPTS" \
-    "$GUI_OPTS" \
+    $SECURITY_OPTS \
+    $GUI_OPTS \
     --rm \
     -ti \
     "$IMAGE_NAME" \
